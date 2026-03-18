@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { useTheme } from "next-themes";
 import { cn } from "@/lib/utils";
+import type { UserResponse } from "@/lib/api";
 
 const badges = [
   {
@@ -82,7 +83,12 @@ const leaderboard = [
   { rank: 5, name: "Dan R.", initials: "DR", xp: 2810, color: "bg-chart-4" },
 ];
 
-export function Profile() {
+type Props = {
+  user: UserResponse;
+  onLogout: () => void;
+};
+
+export function Profile({ user, onLogout }: Props) {
   const { theme, setTheme } = useTheme();
 
   const currentXp = 3890;
@@ -107,11 +113,18 @@ export function Profile() {
         <CardContent className="flex items-center gap-4 p-4">
           <Avatar className="h-16 w-16">
             <AvatarFallback className="bg-primary text-primary-foreground text-xl font-bold">
-              AJ
+              {(user.full_name || user.email || "U")
+                .split(" ")
+                .filter(Boolean)
+                .slice(0, 2)
+                .map((s) => s[0]!.toUpperCase())
+                .join("")}
             </AvatarFallback>
           </Avatar>
           <div className="flex-1">
-            <h2 className="text-lg font-bold text-card-foreground">Alex Johnson</h2>
+            <h2 className="text-lg font-bold text-card-foreground">
+              {user.full_name || user.email}
+            </h2>
             <p className="text-sm text-muted-foreground">
               Habit enthusiast since Jan 2025
             </p>
@@ -126,6 +139,9 @@ export function Profile() {
               </Badge>
             </div>
           </div>
+          <Button variant="outline" size="sm" onClick={onLogout}>
+            Logout
+          </Button>
         </CardContent>
       </Card>
 

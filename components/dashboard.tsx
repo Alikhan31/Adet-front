@@ -1,8 +1,8 @@
 "use client";
 
-import React from "react"
+import React from "react";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Plus,
   Flame,
@@ -22,9 +22,28 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 import { HabitPieChart } from "@/components/habit-pie-chart";
+import { api, type ApiError, type HabitResponse, type UserResponse } from "@/lib/api";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 interface Habit {
-  id: string;
+  id: number;
   name: string;
   icon: React.ElementType;
   category: string;
@@ -34,80 +53,160 @@ interface Habit {
   target: string;
 }
 
-const initialHabits: Habit[] = [
-  {
-    id: "1",
-    name: "Morning Run",
-    icon: Dumbbell,
-    category: "Fitness",
-    color: "hsl(152, 60%, 46%)",
-    streak: 12,
-    completed: false,
-    target: "30 min",
-  },
-  {
-    id: "2",
-    name: "Read 20 Pages",
-    icon: BookOpen,
-    category: "Study",
-    color: "hsl(199, 89%, 48%)",
-    streak: 8,
-    completed: true,
-    target: "20 pages",
-  },
-  {
-    id: "3",
-    name: "Drink 8 Glasses",
-    icon: Droplets,
-    category: "Health",
-    color: "hsl(199, 89%, 48%)",
-    streak: 24,
-    completed: true,
-    target: "8 glasses",
-  },
-  {
-    id: "4",
-    name: "Meditate",
-    icon: Brain,
-    category: "Wellness",
-    color: "hsl(280, 60%, 60%)",
-    streak: 5,
-    completed: false,
-    target: "15 min",
-  },
-  {
-    id: "5",
-    name: "Sleep by 11 PM",
-    icon: Moon,
-    category: "Health",
-    color: "hsl(220, 20%, 40%)",
-    streak: 3,
-    completed: false,
-    target: "Before 11 PM",
-  },
-  {
-    id: "6",
-    name: "Healthy Meal",
-    icon: Heart,
-    category: "Health",
-    color: "hsl(0, 72%, 51%)",
-    streak: 15,
-    completed: true,
-    target: "3 meals",
-  },
-];
+type Props = {
+  token: string;
+  user: UserResponse;
+};
 
-export function Dashboard() {
-  const [habits, setHabits] = useState<Habit[]>(initialHabits);
+const iconPalette = [Dumbbell, BookOpen, Droplets, Brain, Moon, Heart] as const;
+const categoryPalette = ["Fitness", "Study", "Health", "Wellness"] as const;
+const colorPalette = [
+  "hsl(152, 60%, 46%)",
+  "hsl(199, 89%, 48%)",
+  "hsl(280, 60%, 60%)",
+  "hsl(0, 72%, 51%)",
+  "hsl(220, 20%, 40%)",
+] as const;
+
+function todayIso(): string {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function mapHabit(h: HabitResponse, idx: number, completed: boolean): Habit {
+  return {
+    id: h.id,
+    name: h.name,
+    icon: iconPalette[idx % iconPalette.length],
+    category: categoryPalette[idx % categoryPalette.length],
+    color: colorPalette[idx % colorPalette.length],
+    streak: 0,
+    completed,
+    target: `${h.target_count}x (${h.frequency})`,
+  };
+}
+
+export function Dashboard({ token, user }: Props) {
+  const [habits, setHabits] = useState<Habit[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busyIds, setBusyIds] = useState<Set<number>>(new Set());
+  const [createOpen, setCreateOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createName, setCreateName] = useState("");
+  const [createDescription, setCreateDescription] = useState("");
+  const [createFrequency, setCreateFrequency] = useState<"daily" | "weekly">("daily");
+  const [createTargetCount, setCreateTargetCount] = useState<number>(1);
+
+  const today = useMemo(() => todayIso(), []);
 
   const completedCount = habits.filter((h) => h.completed).length;
   const totalCount = habits.length;
-  const progressPercent = Math.round((completedCount / totalCount) * 100);
+  const progressPercent =
+    totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
 
-  const toggleHabit = (id: string) => {
-    setHabits((prev) =>
-      prev.map((h) => (h.id === id ? { ...h, completed: !h.completed } : h))
-    );
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError(null);
+      try {
+        const items = await api.habits.list(token);
+        const completions = await Promise.all(
+          items.map((h) =>
+            api.habits
+              .listCompletions(token, h.id, { from_date: today, to_date: today })
+              .then((rows) => rows.length > 0)
+              .catch(() => false)
+          )
+        );
+        const mapped = items.map((h, idx) => mapHabit(h, idx, completions[idx]!));
+        if (!cancelled) setHabits(mapped);
+      } catch (e) {
+        if (!cancelled) setError((e as ApiError).message ?? "Failed to load habits");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [token, today]);
+
+  const reloadHabits = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const items = await api.habits.list(token);
+      const completions = await Promise.all(
+        items.map((h) =>
+          api.habits
+            .listCompletions(token, h.id, { from_date: today, to_date: today })
+            .then((rows) => rows.length > 0)
+            .catch(() => false)
+        )
+      );
+      const mapped = items.map((h, idx) => mapHabit(h, idx, completions[idx]!));
+      setHabits(mapped);
+    } catch (e) {
+      setError((e as ApiError).message ?? "Failed to load habits");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitCreateHabit = async () => {
+    if (!createName.trim()) return;
+    setCreating(true);
+    setError(null);
+    try {
+      await api.habits.create(token, {
+        name: createName.trim(),
+        description: createDescription.trim() ? createDescription.trim() : null,
+        frequency: createFrequency,
+        target_count: Number.isFinite(createTargetCount) ? createTargetCount : 1,
+      });
+      setCreateOpen(false);
+      setCreateName("");
+      setCreateDescription("");
+      setCreateFrequency("daily");
+      setCreateTargetCount(1);
+      await reloadHabits();
+    } catch (e) {
+      setError((e as ApiError).message ?? "Failed to create habit");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const toggleHabit = async (id: number) => {
+    if (busyIds.has(id)) return;
+    setBusyIds((prev) => new Set(prev).add(id));
+    setError(null);
+    try {
+      const current = habits.find((h) => h.id === id);
+      const isCompleted = current?.completed ?? false;
+      if (!isCompleted) {
+        await api.habits.completeToday(token, id);
+      } else {
+        await api.habits.removeCompletion(token, id, today);
+      }
+      setHabits((prev) =>
+        prev.map((h) => (h.id === id ? { ...h, completed: !h.completed } : h))
+      );
+    } catch (e) {
+      setError((e as ApiError).message ?? "Failed to update habit");
+    } finally {
+      setBusyIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
   };
 
   return (
@@ -117,16 +216,100 @@ export function Dashboard() {
         <div>
           <p className="text-sm text-muted-foreground">Good morning</p>
           <h1 className="text-2xl font-bold tracking-tight text-foreground">
-            Alex
+            {user.full_name || user.email}
           </h1>
         </div>
-        <Button
-          size="icon"
-          className="h-10 w-10 rounded-full bg-primary text-primary-foreground shadow-lg"
-        >
-          <Plus className="h-5 w-5" />
-          <span className="sr-only">Add habit</span>
-        </Button>
+        <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+          <Button
+            size="icon"
+            className="h-10 w-10 rounded-full bg-primary text-primary-foreground shadow-lg"
+            onClick={() => setCreateOpen(true)}
+          >
+            <Plus className="h-5 w-5" />
+            <span className="sr-only">Add habit</span>
+          </Button>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Create habit</DialogTitle>
+              <DialogDescription>
+                Add a new habit. You can complete it from the dashboard.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="grid gap-4">
+              <div className="grid gap-2">
+                <Label htmlFor="habit-name">Name</Label>
+                <Input
+                  id="habit-name"
+                  value={createName}
+                  onChange={(e) => setCreateName(e.target.value)}
+                  placeholder="e.g. Morning Run"
+                  autoComplete="off"
+                />
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="habit-desc">Description (optional)</Label>
+                <Textarea
+                  id="habit-desc"
+                  value={createDescription}
+                  onChange={(e) => setCreateDescription(e.target.value)}
+                  placeholder="Why this habit matters..."
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-2">
+                  <Label>Frequency</Label>
+                  <Select
+                    value={createFrequency}
+                    onValueChange={(v) =>
+                      setCreateFrequency(v === "weekly" ? "weekly" : "daily")
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Choose frequency" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="daily">Daily</SelectItem>
+                      <SelectItem value="weekly">Weekly</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="habit-target">Target count</Label>
+                  <Input
+                    id="habit-target"
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={String(createTargetCount)}
+                    onChange={(e) => setCreateTargetCount(Number(e.target.value || 1))}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setCreateOpen(false)}
+                disabled={creating}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void submitCreateHabit()}
+                disabled={creating || !createName.trim()}
+              >
+                {creating ? "Creating..." : "Create"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
 
       {/* AI Insight Card */}
@@ -161,6 +344,8 @@ export function Dashboard() {
         </p>
       </div>
 
+      {error && <p className="mt-4 text-sm text-destructive">{error}</p>}
+
       {/* Pie Chart */}
       <div className="mt-6">
         <h2 className="text-sm font-semibold text-foreground">
@@ -175,7 +360,20 @@ export function Dashboard() {
           {"Today's Habits"}
         </h2>
         <div className="mt-3 flex flex-col gap-2.5">
-          {habits.map((habit) => {
+          {loading && habits.length === 0 ? (
+            <Card className="border">
+              <CardContent className="p-4 text-sm text-muted-foreground">
+                Loading habits...
+              </CardContent>
+            </Card>
+          ) : habits.length === 0 ? (
+            <Card className="border">
+              <CardContent className="p-4 text-sm text-muted-foreground">
+                No habits yet. Create one via API to see it here.
+              </CardContent>
+            </Card>
+          ) : (
+            habits.map((habit) => {
             const Icon = habit.icon;
             return (
               <Card
@@ -184,14 +382,14 @@ export function Dashboard() {
                   "cursor-pointer border transition-all hover:shadow-md",
                   habit.completed && "bg-muted/50"
                 )}
-                onClick={() => toggleHabit(habit.id)}
+                onClick={() => void toggleHabit(habit.id)}
                 role="button"
                 tabIndex={0}
                 aria-label={`${habit.completed ? "Unmark" : "Mark"} ${habit.name} as complete`}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    toggleHabit(habit.id);
+                    void toggleHabit(habit.id);
                   }
                 }}
               >
@@ -234,7 +432,8 @@ export function Dashboard() {
                 </CardContent>
               </Card>
             );
-          })}
+          })
+          )}
         </div>
       </div>
     </div>
