@@ -3,7 +3,7 @@
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 
 interface Habit {
-  id: string;
+  id: number;
   name: string;
   category: string;
   color: string;

@@ -1,158 +1,128 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
+import { TrendingUp, Target, Zap, Calendar, Brain, GitBranch } from "lucide-react";
 import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
-  Tooltip,
-  AreaChart,
-  Area,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip,
+  LineChart, Line, ReferenceLine,
 } from "recharts";
-import {
-  TrendingUp,
-  Target,
-  Zap,
-  Calendar,
-  ArrowUpRight,
-  ArrowDownRight,
-} from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { cn } from "@/lib/utils";
+import {
+  api,
+  type AnalyticsSummaryResponse,
+  type SentimentTrendResponse,
+  type CorrelationMatrixResponse,
+  type ApiError,
+} from "@/lib/api";
 
-const weeklyData = [
-  { day: "Mon", completed: 5, total: 6 },
-  { day: "Tue", completed: 4, total: 6 },
-  { day: "Wed", completed: 6, total: 6 },
-  { day: "Thu", completed: 3, total: 6 },
-  { day: "Fri", completed: 5, total: 6 },
-  { day: "Sat", completed: 6, total: 6 },
-  { day: "Sun", completed: 4, total: 6 },
-];
+type Props = { token: string };
 
-const monthlyTrend = [
-  { week: "W1", rate: 68 },
-  { week: "W2", rate: 72 },
-  { week: "W3", rate: 78 },
-  { week: "W4", rate: 85 },
-];
+export function Analytics({ token }: Props) {
+  const [summary, setSummary] = useState<AnalyticsSummaryResponse | null>(null);
+  const [chartData, setChartData] = useState<Array<{ day: string; completed: number }>>([]);
+  const [sentiment, setSentiment] = useState<SentimentTrendResponse | null>(null);
+  const [correlations, setCorrelations] = useState<CorrelationMatrixResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-const categoryBreakdown = [
-  { name: "Fitness", value: 35, color: "hsl(152, 60%, 46%)" },
-  { name: "Study", value: 25, color: "hsl(199, 89%, 48%)" },
-  { name: "Health", value: 25, color: "hsl(0, 72%, 51%)" },
-  { name: "Wellness", value: 15, color: "hsl(280, 60%, 60%)" },
-];
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError(null);
+      try {
+        const [s, sent, corr] = await Promise.all([
+          api.analytics.summary(token),
+          api.analytics.sentiment(token, 90).catch(() => null),
+          api.analytics.correlations(token, 90, 0.3).catch(() => null),
+        ]);
 
-const stats = [
-  {
-    label: "Consistency",
-    value: "85%",
-    change: "+12%",
-    trend: "up" as const,
-    icon: Target,
-  },
-  {
-    label: "Best Streak",
-    value: "24 days",
-    change: "+3",
-    trend: "up" as const,
-    icon: Zap,
-  },
-  {
-    label: "This Week",
-    value: "33/42",
-    change: "+5",
-    trend: "up" as const,
-    icon: Calendar,
-  },
-  {
-    label: "Success Rate",
-    value: "79%",
-    change: "-2%",
-    trend: "down" as const,
-    icon: TrendingUp,
-  },
-];
+        const today = new Date();
+        const start = new Date(today);
+        start.setDate(today.getDate() - 6);
+        const fromDate = start.toISOString().slice(0, 10);
+        const toDate = today.toISOString().slice(0, 10);
 
-const habitRankings = [
-  { name: "Drink Water", rate: 96, color: "hsl(199, 89%, 48%)" },
-  { name: "Healthy Meal", rate: 89, color: "hsl(0, 72%, 51%)" },
-  { name: "Morning Run", rate: 82, color: "hsl(152, 60%, 46%)" },
-  { name: "Read 20 Pages", rate: 75, color: "hsl(199, 89%, 48%)" },
-  { name: "Meditate", rate: 64, color: "hsl(280, 60%, 60%)" },
-  { name: "Sleep by 11 PM", rate: 52, color: "hsl(220, 20%, 40%)" },
-];
+        const habits = await api.habits.list(token);
+        const completionsByHabit = await Promise.all(
+          habits.map((h) => api.habits.listCompletions(token, h.id, { from_date: fromDate, to_date: toDate }))
+        );
 
-function CustomTooltip({
-  active,
-  payload,
-  label,
-}: {
-  active?: boolean;
-  payload?: Array<{ value: number; name: string }>;
-  label?: string;
-}) {
-  if (active && payload && payload.length) {
-    return (
-      <div className="rounded-lg border border-border bg-card px-3 py-2 text-xs shadow-md">
-        <p className="font-medium text-card-foreground">{label}</p>
-        {payload.map((p) => (
-          <p key={p.name} className="text-muted-foreground">
-            {p.name}: <span className="font-semibold text-card-foreground">{p.value}</span>
-          </p>
-        ))}
-      </div>
-    );
-  }
-  return null;
-}
+        const counts = new Map<string, number>();
+        for (let i = 0; i < 7; i += 1) {
+          const d = new Date(start);
+          d.setDate(start.getDate() + i);
+          counts.set(d.toISOString().slice(0, 10), 0);
+        }
+        completionsByHabit.flat().forEach((c) => {
+          if (counts.has(c.completed_date)) {
+            counts.set(c.completed_date, (counts.get(c.completed_date) ?? 0) + 1);
+          }
+        });
 
-export function Analytics() {
+        const chart = Array.from(counts.entries()).map(([iso, completed]) => {
+          const d = new Date(`${iso}T00:00:00`);
+          const day = d.toLocaleDateString("en-US", { weekday: "short" });
+          return { day, completed };
+        });
+
+        if (!cancelled) {
+          setSummary(s);
+          setChartData(chart);
+          setSentiment(sent);
+          setCorrelations(corr);
+        }
+      } catch (e) {
+        if (!cancelled) setError((e as ApiError).message ?? "Failed to load analytics");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    void load();
+    return () => { cancelled = true; };
+  }, [token]);
+
+  const consistency = useMemo(() => {
+    if (!summary) return 0;
+    return Math.min(100, Math.round((summary.completions_this_week / 7) * 100));
+  }, [summary]);
+
+  const stats = [
+    { label: "Consistency", value: `${consistency}%`, icon: Target },
+    { label: "Current Streak", value: `${summary?.stats.current_streak_days ?? 0} days`, icon: Zap },
+    { label: "This Week", value: `${summary?.completions_this_week ?? 0} completions`, icon: Calendar },
+    { label: "Total XP", value: `${summary?.stats.total_xp ?? 0}`, icon: TrendingUp },
+  ];
+
+  const sentimentChart = useMemo(() => {
+    if (!sentiment?.daily.length) return [];
+    return sentiment.daily.slice(-30).map((d) => ({
+      label: new Date(`${d.date}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+      score: d.avg_score,
+    }));
+  }, [sentiment]);
+
+  const sentimentColor = (avg: number) =>
+    avg >= 0.05 ? "hsl(var(--chart-2))" : avg <= -0.05 ? "hsl(var(--destructive))" : "hsl(var(--muted-foreground))";
+
   return (
-    <div className="mx-auto max-w-lg px-4 pt-6">
-      {/* Header */}
+    <div className="mx-auto max-w-lg px-4 pt-6 pb-8">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold tracking-tight text-foreground">
-          Analytics
-        </h1>
-        <span className="text-sm text-muted-foreground">This Week</span>
+        <h1 className="text-2xl font-bold tracking-tight text-foreground">Analytics</h1>
+        <span className="text-sm text-muted-foreground">Live API</span>
       </div>
 
-      {/* Stats Grid */}
+      {/* Stat cards */}
       <div className="mt-5 grid grid-cols-2 gap-3">
         {stats.map((stat) => {
           const Icon = stat.icon;
           return (
             <Card key={stat.label} className="border">
               <CardContent className="p-3.5">
-                <div className="flex items-center justify-between">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-                    <Icon className="h-4 w-4 text-primary" />
-                  </div>
-                  <div
-                    className={cn(
-                      "flex items-center gap-0.5 text-xs font-semibold",
-                      stat.trend === "up" ? "text-primary" : "text-destructive"
-                    )}
-                  >
-                    {stat.trend === "up" ? (
-                      <ArrowUpRight className="h-3 w-3" />
-                    ) : (
-                      <ArrowDownRight className="h-3 w-3" />
-                    )}
-                    {stat.change}
-                  </div>
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+                  <Icon className="h-4 w-4 text-primary" />
                 </div>
-                <p className="mt-2 text-xl font-bold text-card-foreground">
-                  {stat.value}
-                </p>
+                <p className="mt-2 text-xl font-bold text-card-foreground">{stat.value}</p>
                 <p className="text-xs text-muted-foreground">{stat.label}</p>
               </CardContent>
             </Card>
@@ -160,230 +130,125 @@ export function Analytics() {
         })}
       </div>
 
-      {/* Charts */}
-      <Tabs defaultValue="weekly" className="mt-6">
-        <TabsList className="w-full">
-          <TabsTrigger value="weekly" className="flex-1">
-            Weekly
-          </TabsTrigger>
-          <TabsTrigger value="trend" className="flex-1">
-            Trend
-          </TabsTrigger>
-          <TabsTrigger value="category" className="flex-1">
-            Category
-          </TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="weekly" className="mt-4">
-          <Card className="border">
-            <CardContent className="p-4">
-              <h3 className="text-sm font-semibold text-card-foreground">
-                Daily Completions
-              </h3>
-              <div className="mt-3 h-48">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={weeklyData} barGap={4}>
-                    <CartesianGrid
-                      strokeDasharray="3 3"
-                      stroke="hsl(var(--border))"
-                      vertical={false}
-                    />
-                    <XAxis
-                      dataKey="day"
-                      axisLine={false}
-                      tickLine={false}
-                      tick={{ fontSize: 12, fill: "hsl(var(--muted-foreground))" }}
-                    />
-                    <YAxis
-                      axisLine={false}
-                      tickLine={false}
-                      tick={{ fontSize: 12, fill: "hsl(var(--muted-foreground))" }}
-                    />
-                    <Tooltip content={<CustomTooltip />} />
-                    <Bar
-                      dataKey="completed"
-                      name="Completed"
-                      fill="hsl(var(--chart-1))"
-                      radius={[6, 6, 0, 0]}
-                      maxBarSize={32}
-                    />
-                    <Bar
-                      dataKey="total"
-                      name="Total"
-                      fill="hsl(var(--muted))"
-                      radius={[6, 6, 0, 0]}
-                      maxBarSize={32}
-                    />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="trend" className="mt-4">
-          <Card className="border">
-            <CardContent className="p-4">
-              <h3 className="text-sm font-semibold text-card-foreground">
-                Consistency Trend
-              </h3>
-              <div className="mt-3 h-48">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={monthlyTrend}>
-                    <CartesianGrid
-                      strokeDasharray="3 3"
-                      stroke="hsl(var(--border))"
-                      vertical={false}
-                    />
-                    <XAxis
-                      dataKey="week"
-                      axisLine={false}
-                      tickLine={false}
-                      tick={{ fontSize: 12, fill: "hsl(var(--muted-foreground))" }}
-                    />
-                    <YAxis
-                      axisLine={false}
-                      tickLine={false}
-                      tick={{ fontSize: 12, fill: "hsl(var(--muted-foreground))" }}
-                      domain={[50, 100]}
-                    />
-                    <Tooltip content={<CustomTooltip />} />
-                    <defs>
-                      <linearGradient id="colorRate" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="hsl(var(--chart-1))" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="hsl(var(--chart-1))" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <Area
-                      type="monotone"
-                      dataKey="rate"
-                      name="Rate"
-                      stroke="hsl(var(--chart-1))"
-                      fill="url(#colorRate)"
-                      strokeWidth={2}
-                    />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="category" className="mt-4">
-          <Card className="border">
-            <CardContent className="p-4">
-              <h3 className="text-sm font-semibold text-card-foreground">
-                Category Breakdown
-              </h3>
-              <div className="mt-3 flex items-center gap-6">
-                <div className="h-40 w-40 shrink-0">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={categoryBreakdown}
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={40}
-                        outerRadius={70}
-                        paddingAngle={4}
-                        dataKey="value"
-                        strokeWidth={0}
-                      >
-                        {categoryBreakdown.map((entry) => (
-                          <Cell key={entry.name} fill={entry.color} />
-                        ))}
-                      </Pie>
-                      <Tooltip
-                        content={({ active, payload }) => {
-                          if (active && payload && payload.length) {
-                            return (
-                              <div className="rounded-lg border border-border bg-card px-3 py-1.5 text-xs shadow-sm">
-                                <span className="font-medium text-card-foreground">
-                                  {payload[0].name}
-                                </span>
-                                <span className="ml-2 text-muted-foreground">
-                                  {payload[0].value}%
-                                </span>
-                              </div>
-                            );
-                          }
-                          return null;
-                        }}
-                      />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className="flex flex-col gap-3">
-                  {categoryBreakdown.map((item) => (
-                    <div key={item.name} className="flex items-center gap-2">
-                      <div
-                        className="h-3 w-3 rounded-full"
-                        style={{ backgroundColor: item.color }}
-                      />
-                      <span className="text-xs text-muted-foreground">
-                        {item.name}
-                      </span>
-                      <span className="text-xs font-bold text-card-foreground">
-                        {item.value}%
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
-
-      {/* AI Prediction */}
+      {/* Level banner */}
       <Card className="mt-5 border-0 bg-primary text-primary-foreground shadow-lg">
         <CardContent className="p-4">
-          <div className="flex items-center gap-2">
-            <Zap className="h-5 w-5" />
-            <p className="text-sm font-semibold">AI Prediction</p>
-          </div>
-          <p className="mt-1.5 text-sm leading-relaxed opacity-90">
-            Based on your current trajectory, there is a 78% chance you will maintain
-            all streaks through next week. Focus on Meditation and Sleep habits
-            for the biggest impact.
-          </p>
+          <p className="text-sm font-semibold">Level {summary?.stats.level ?? 0}</p>
+          <p className="mt-1.5 text-sm opacity-90">Longest streak: {summary?.stats.longest_streak_days ?? 0} days</p>
+          <p className="text-sm opacity-90">Completed today: {summary?.completions_today ?? 0}</p>
         </CardContent>
       </Card>
 
-      {/* Habit Rankings */}
-      <div className="mt-6 pb-4">
-        <h2 className="text-sm font-semibold text-foreground">
-          Habit Success Rates
-        </h2>
-        <div className="mt-3 flex flex-col gap-2.5">
-          {habitRankings.map((habit, idx) => (
-            <div key={habit.name} className="flex items-center gap-3">
-              <span className="w-5 text-right text-xs font-bold text-muted-foreground">
-                {idx + 1}
-              </span>
-              <div className="flex-1">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-foreground">
-                    {habit.name}
-                  </span>
-                  <span className="text-sm font-bold text-foreground">
-                    {habit.rate}%
-                  </span>
-                </div>
-                <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-muted">
-                  <div
-                    className="h-full rounded-full transition-all"
-                    style={{
-                      width: `${habit.rate}%`,
-                      backgroundColor: habit.color,
-                    }}
-                  />
-                </div>
+      {/* 7-day bar chart */}
+      <Card className="mt-5 border">
+        <CardContent className="p-4">
+          <p className="text-sm font-semibold text-card-foreground">Last 7 days completions</p>
+          <div className="mt-3 h-52">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+                <XAxis dataKey="day" axisLine={false} tickLine={false} />
+                <YAxis axisLine={false} tickLine={false} allowDecimals={false} />
+                <Tooltip />
+                <Bar dataKey="completed" fill="hsl(var(--chart-1))" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Sentiment */}
+      <Card className="mt-5 border">
+        <CardContent className="p-4">
+          <div className="flex items-center gap-2">
+            <Brain className="h-4 w-4 text-primary" />
+            <p className="text-sm font-semibold text-card-foreground">Mood from notes</p>
+          </div>
+
+          {sentiment && sentiment.daily.length > 0 ? (
+            <>
+              <p className="mt-2 text-xs text-muted-foreground">{sentiment.insight}</p>
+              <div className="mt-3 h-40">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={sentimentChart}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+                    <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 10 }} interval="preserveStartEnd" />
+                    <YAxis domain={[-1, 1]} axisLine={false} tickLine={false} tick={{ fontSize: 10 }} />
+                    <Tooltip formatter={(v: number) => v.toFixed(2)} />
+                    <ReferenceLine y={0} stroke="hsl(var(--border))" strokeDasharray="4 4" />
+                    <Line
+                      type="monotone"
+                      dataKey="score"
+                      stroke={sentimentColor(sentiment.overall_avg)}
+                      strokeWidth={2}
+                      dot={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
               </div>
+              <p className="mt-1 text-xs text-muted-foreground text-right">
+                Overall avg: <span className="font-medium">{sentiment.overall_avg.toFixed(2)}</span>
+              </p>
+            </>
+          ) : (
+            <p className="mt-2 text-xs text-muted-foreground">
+              Add notes when completing habits to see your mood trend here.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Correlations */}
+      <Card className="mt-5 border">
+        <CardContent className="p-4">
+          <div className="flex items-center gap-2">
+            <GitBranch className="h-4 w-4 text-primary" />
+            <p className="text-sm font-semibold text-card-foreground">Habit correlations</p>
+          </div>
+
+          {correlations && correlations.edges.length > 0 ? (
+            <div className="mt-3 space-y-3">
+              <p className="text-xs text-muted-foreground">
+                Tracked over {correlations.total_days_tracked} days. Positive = tend to happen together.
+              </p>
+              {correlations.edges.slice(0, 6).map((edge) => {
+                const pct = Math.round(Math.abs(edge.correlation) * 100);
+                const positive = edge.correlation >= 0;
+                return (
+                  <div key={`${edge.habit_a_id}-${edge.habit_b_id}`}>
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="text-card-foreground font-medium truncate max-w-[70%]">
+                        {edge.habit_a_name} ↔ {edge.habit_b_name}
+                      </span>
+                      <span className={positive ? "text-green-600 dark:text-green-400" : "text-red-500"}>
+                        {positive ? "+" : ""}{edge.correlation.toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${positive ? "bg-green-500" : "bg-red-500"}`}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      {edge.co_occurrence_days} days together
+                    </p>
+                  </div>
+                );
+              })}
             </div>
-          ))}
-        </div>
-      </div>
+          ) : correlations && correlations.habits.length < 2 ? (
+            <p className="mt-2 text-xs text-muted-foreground">Add at least 2 habits to see correlations.</p>
+          ) : (
+            <p className="mt-2 text-xs text-muted-foreground">
+              No strong correlations yet — keep tracking and patterns will appear.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      {loading && <p className="mt-4 text-sm text-muted-foreground">Loading analytics...</p>}
+      {error && <p className="mt-4 text-sm text-destructive">{error}</p>}
     </div>
   );
 }

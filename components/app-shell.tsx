@@ -35,8 +35,8 @@ export function AppShell() {
         <div className="flex min-h-dvh flex-col bg-background">
           <main className="flex-1 overflow-y-auto pb-20">
             {activeTab === "home" && <Dashboard token={token} user={user} />}
-            {activeTab === "social" && <Social />}
-            {activeTab === "analytics" && <Analytics />}
+            {activeTab === "social" && <Social token={token} userId={user.id} />}
+            {activeTab === "analytics" && <Analytics token={token} />}
             {activeTab === "coach" && <AiCoach />}
             {activeTab === "profile" && <Profile onLogout={logout} user={user} />}
           </main>

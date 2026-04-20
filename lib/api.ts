@@ -22,7 +22,7 @@ async function parseErrorBody(res: Response): Promise<unknown> {
   try {
     return await res.text();
   } catch {
-    return undefined;
+    return undefined; 
   }
 }
 
@@ -81,9 +81,16 @@ export async function apiFetch<T>(
     throw err;
   }
 
+  if (res.status === 204) return undefined as T;
+
   const ct = res.headers.get("content-type") || "";
+  const contentLength = res.headers.get("content-length");
+  if (contentLength === "0") return undefined as T;
+
   if (ct.includes("application/json")) return (await res.json()) as T;
-  return (await res.text()) as T;
+  const text = await res.text();
+  if (!text) return undefined as T;
+  return text as T;
 }
 
 export type UserResponse = {
@@ -105,6 +112,7 @@ export type HabitResponse = {
   description: string | null;
   frequency: string;
   target_count: number;
+  days_of_week: number[]; // 0=Mon … 6=Sun
   created_at: string;
   updated_at: string;
 };
@@ -118,6 +126,94 @@ export type HabitCompletionResponse = {
   created_at: string;
 };
 
+export type UserStatsResponse = {
+  total_xp: number;
+  level: number;
+  current_streak_days: number;
+  longest_streak_days: number;
+  updated_at: string;
+};
+
+export type AnalyticsSummaryResponse = {
+  stats: UserStatsResponse;
+  completions_this_week: number;
+  completions_today: number;
+};
+
+export type FriendResponse = {
+  id: number;
+  email: string;
+  full_name: string | null;
+  status: string;
+  created_at: string;
+};
+
+export type FeedCommentResponse = {
+  id: number;
+  event_id: number;
+  user_id: number;
+  user_email: string | null;
+  user_full_name: string | null;
+  text: string;
+  created_at: string;
+};
+
+export type ActivityFeedItemResponse = {
+  id: number;
+  user_id: number;
+  user_email: string | null;
+  user_full_name: string | null;
+  event_type: string;
+  payload: Record<string, unknown> | null;
+  created_at: string;
+  reactions: { id: number; event_id: number; user_id: number; type: string; created_at: string }[];
+  comments: FeedCommentResponse[];
+  comments_count: number;
+};
+
+export type FriendSearchResult = {
+  id: number;
+  email: string;
+  full_name: string | null;
+  friendship_status: string | null;
+};
+
+export type DailySentiment = {
+  date: string;
+  avg_score: number;
+  notes_count: number;
+};
+
+export type SentimentTrendResponse = {
+  daily: DailySentiment[];
+  overall_avg: number;
+  insight: string;
+};
+
+export type HabitCorrelationEdge = {
+  habit_a_id: number;
+  habit_a_name: string;
+  habit_b_id: number;
+  habit_b_name: string;
+  correlation: number;
+  co_occurrence_days: number;
+};
+
+export type CorrelationMatrixResponse = {
+  habits: { id: number; name: string }[];
+  edges: HabitCorrelationEdge[];
+  total_days_tracked: number;
+};
+
+export type HeatmapDay = {
+  date: string;
+  count: number;
+};
+
+export type HeatmapResponse = {
+  days: HeatmapDay[];
+};
+
 export const api = {
   auth: {
     register: (payload: { email: string; password: string; full_name?: string }) =>
@@ -128,9 +224,15 @@ export const api = {
         form: { username: payload.email, password: payload.password },
       }),
     me: (token: string) => apiFetch<UserResponse>("/api/auth/me", { token }),
+    forgotPassword: (email: string) =>
+      apiFetch<{ message: string }>("/api/auth/forgot-password", { method: "POST", body: { email } }),
   },
   habits: {
-    list: (token: string) => apiFetch<HabitResponse[]>("/api/habits", { token }),
+    list: (token: string, day?: number) =>
+      apiFetch<HabitResponse[]>(
+        day !== undefined ? `/api/habits?day=${day}` : "/api/habits",
+        { token }
+      ),
     create: (
       token: string,
       payload: {
@@ -138,6 +240,7 @@ export const api = {
         description?: string | null;
         frequency?: string;
         target_count?: number;
+        days_of_week?: number[];
       }
     ) =>
       apiFetch<HabitResponse>("/api/habits", {
@@ -164,11 +267,85 @@ export const api = {
         method: "POST",
         token,
       }),
+    complete: (token: string, habitId: number, completedDate: string) =>
+      apiFetch<HabitCompletionResponse>(`/api/habits/${habitId}/completions`, {
+        method: "POST",
+        token,
+        body: { completed_date: completedDate, count: 1 },
+      }),
     removeCompletion: (token: string, habitId: number, completedDate: string) =>
       apiFetch<void>(`/api/habits/${habitId}/completions/${completedDate}`, {
         method: "DELETE",
         token,
       }),
+    updateNote: (token: string, habitId: number, completedDate: string, note: string | null) =>
+      apiFetch<HabitCompletionResponse>(`/api/habits/${habitId}/completions/${completedDate}`, {
+        method: "PATCH",
+        token,
+        body: { note },
+      }),
+    update: (
+      token: string,
+      habitId: number,
+      payload: { name?: string; description?: string | null; frequency?: string; target_count?: number; days_of_week?: number[] }
+    ) =>
+      apiFetch<HabitResponse>(`/api/habits/${habitId}`, {
+        method: "PATCH",
+        token,
+        body: payload,
+      }),
+    delete: (token: string, habitId: number) =>
+      apiFetch<void>(`/api/habits/${habitId}`, { method: "DELETE", token }),
+  },
+  analytics: {
+    summary: (token: string) =>
+      apiFetch<AnalyticsSummaryResponse>("/api/analytics/summary", { token }),
+    stats: (token: string) => apiFetch<UserStatsResponse>("/api/analytics/stats", { token }),
+    sentiment: (token: string, days = 90) =>
+      apiFetch<SentimentTrendResponse>(`/api/analytics/sentiment?days=${days}`, { token }),
+    correlations: (token: string, days = 90, minCorrelation = 0.3) =>
+      apiFetch<CorrelationMatrixResponse>(
+        `/api/analytics/correlations?days=${days}&min_correlation=${minCorrelation}`,
+        { token }
+      ),
+    heatmap: (token: string, days = 365) =>
+      apiFetch<HeatmapResponse>(`/api/analytics/heatmap?days=${days}`, { token }),
+  },
+  friends: {
+    list: (token: string) => apiFetch<FriendResponse[]>("/api/friends", { token }),
+    addByEmail: (token: string, email: string) =>
+      apiFetch<FriendResponse>("/api/friends", {
+        method: "POST",
+        token,
+        body: { email },
+      }),
+    remove: (token: string, friendId: number) =>
+      apiFetch<void>(`/api/friends/${friendId}`, { method: "DELETE", token }),
+    accept: (token: string, friendshipId: number) =>
+      apiFetch<FriendResponse>(`/api/friends/${friendshipId}/accept`, { method: "PATCH", token }),
+    reject: (token: string, friendshipId: number) =>
+      apiFetch<void>(`/api/friends/${friendshipId}/reject`, { method: "PATCH", token }),
+    requests: (token: string) => apiFetch<FriendResponse[]>("/api/friends/requests", { token }),
+  },
+  feed: {
+    list: (token: string, params?: { friends_only?: boolean }) => {
+      const qs = new URLSearchParams();
+      if (params?.friends_only) qs.set("friends_only", "true");
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return apiFetch<ActivityFeedItemResponse[]>(`/api/feed${suffix}`, { token });
+    },
+    addComment: (token: string, eventId: number, text: string) =>
+      apiFetch<FeedCommentResponse>(`/api/feed/${eventId}/comments`, {
+        method: "POST",
+        token,
+        body: { text },
+      }),
+    deleteComment: (token: string, eventId: number, commentId: number) =>
+      apiFetch<void>(`/api/feed/${eventId}/comments/${commentId}`, { method: "DELETE", token }),
+  },
+  search: {
+    users: (token: string, q: string) =>
+      apiFetch<FriendSearchResult[]>(`/api/friends/search?q=${encodeURIComponent(q)}`, { token }),
   },
 };
 
