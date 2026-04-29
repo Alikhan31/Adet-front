@@ -10,7 +10,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "HabitFlow - Social Habit Tracker",
+  title: "Adet - Social Habit Tracker",
   description:
     "Track habits, share progress with friends, and get AI-powered insights to stay consistent.",
 };

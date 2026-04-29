@@ -26,6 +26,17 @@ async function parseErrorBody(res: Response): Promise<unknown> {
   }
 }
 
+function friendlyError(status: number, raw: string): string {
+  if (status >= 500) return "Something went wrong. Please try again later.";
+  if (status === 401) return "Session expired. Please sign in again.";
+  if (status === 403) return "You don't have permission to do that.";
+  if (status === 404) return "Not found.";
+  // hide internal detail strings like JSON parse errors or stack traces
+  if (raw.toLowerCase().includes("internal") || raw.includes("{") || raw.length > 120)
+    return "Something went wrong. Please try again later.";
+  return raw;
+}
+
 export async function apiFetch<T>(
   path: string,
   opts?: {
@@ -70,13 +81,14 @@ export async function apiFetch<T>(
   const res = await fetch(url, { method, headers, body });
   if (!res.ok) {
     const details = await parseErrorBody(res);
-    const message =
+    const rawMessage =
       (typeof details === "object" &&
         details !== null &&
         "detail" in details &&
         typeof (details as any).detail === "string" &&
         (details as any).detail) ||
       `${res.status} ${res.statusText}`;
+    const message = friendlyError(res.status, rawMessage);
     const err: ApiError = { status: res.status, message, details };
     throw err;
   }
@@ -98,6 +110,7 @@ export type UserResponse = {
   email: string;
   full_name: string | null;
   is_active: boolean;
+  created_at: string;
 };
 
 export type TokenResponse = {
@@ -113,6 +126,9 @@ export type HabitResponse = {
   frequency: string;
   target_count: number;
   days_of_week: number[]; // 0=Mon … 6=Sun
+  visibility: "friends" | "selected" | "private";
+  category: string | null;
+  icon: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -136,8 +152,44 @@ export type UserStatsResponse = {
 
 export type AnalyticsSummaryResponse = {
   stats: UserStatsResponse;
-  completions_this_week: number;
   completions_today: number;
+  completions_this_week: number;
+  possible_this_week: number;
+  total_completions: number;
+  habits_count: number;
+  last_7_days: { date: string; count: number }[];
+  best_weekday: string | null;
+  badges: {
+    id: string;
+    title: string;
+    category: "created_habits" | "overall_streak" | "habit_streak" | string;
+    threshold: number;
+    value: number;
+    earned: boolean;
+  }[];
+  habit_streaks: {
+    habit_id: number;
+    habit_name: string;
+    current_streak_days: number;
+    longest_streak_days: number;
+  }[];
+};
+
+export type LeaderboardEntry = {
+  user_id: number;
+  name: string;
+  initials: string;
+  total_xp: number;
+  rank: number;
+  is_me: boolean;
+};
+
+export type LeaderboardResponse = {
+  period: "total" | "month" | string;
+  month: string | null;
+  entries: LeaderboardEntry[];
+  me_rank: number | null;
+  me_xp: number;
 };
 
 export type FriendResponse = {
@@ -205,6 +257,31 @@ export type CorrelationMatrixResponse = {
   total_days_tracked: number;
 };
 
+export type SharedHabitInvitation = {
+  group_id: number;
+  habit_id: number;
+  habit_name: string;
+  owner_name: string | null;
+  owner_email: string;
+  invited_at: string;
+};
+
+export type SharedHabitMemberStat = {
+  user_id: number;
+  full_name: string | null;
+  email: string;
+  status: string;
+  streak: number;
+  completion_rate: number;
+  is_owner: boolean;
+  habit_id: number | null;
+};
+
+export type ShareInfo = {
+  group_id: number | null;
+  is_owner: boolean;
+};
+
 export type HeatmapDay = {
   date: string;
   count: number;
@@ -214,10 +291,55 @@ export type HeatmapResponse = {
   days: HeatmapDay[];
 };
 
+export type HabitDayCount = { date: string; count: number };
+
+export type HabitAnalyticsItem = {
+  habit_id: number;
+  habit_name: string;
+  category: string | null;
+  icon: string | null;
+  current_streak: number;
+  longest_streak: number;
+  total_completions: number;
+  completion_rate: number;
+  last_30_days: HabitDayCount[];
+};
+
+export type QuestionField = {
+  id: string;
+  label: string;
+  type: "number" | "text" | "chips" | "slider";
+  options?: string[];
+  placeholder?: string;
+  min?: number;
+  max?: number;
+};
+
+export type ProposedHabit = {
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  icon?: string | null;
+  days_of_week: number[];
+  target_count: number;
+  reason?: string | null;
+  existing_habit_id?: number | null;
+};
+
+export type AnalyzeResponse = {
+  mode: "questions" | "analysis";
+  intro?: string | null;
+  questions: QuestionField[];
+  text: string;
+  key_insights: string[];
+  charts: { type: string; title: string; x_key: string; y_key: string; data: Record<string, unknown>[]; color: string | null }[];
+  proposed_habits: ProposedHabit[];
+};
+
 export const api = {
   auth: {
     register: (payload: { email: string; password: string; full_name?: string }) =>
-      apiFetch<UserResponse>("/api/auth/register", { method: "POST", body: payload }),
+      apiFetch<{ message: string }>("/api/auth/register", { method: "POST", body: payload }),
     login: (payload: { email: string; password: string }) =>
       apiFetch<TokenResponse>("/api/auth/login", {
         method: "POST",
@@ -226,6 +348,10 @@ export const api = {
     me: (token: string) => apiFetch<UserResponse>("/api/auth/me", { token }),
     forgotPassword: (email: string) =>
       apiFetch<{ message: string }>("/api/auth/forgot-password", { method: "POST", body: { email } }),
+    verifyEmail: (token: string) =>
+      apiFetch<TokenResponse & { message: string }>(`/api/auth/verify-email?token=${encodeURIComponent(token)}`),
+    resendVerification: (email: string) =>
+      apiFetch<{ message: string }>("/api/auth/resend-verification", { method: "POST", body: { email } }),
   },
   habits: {
     list: (token: string, day?: number) =>
@@ -241,6 +367,9 @@ export const api = {
         frequency?: string;
         target_count?: number;
         days_of_week?: number[];
+        category?: string | null;
+        icon?: string | null;
+        visibility?: string;
       }
     ) =>
       apiFetch<HabitResponse>("/api/habits", {
@@ -287,7 +416,7 @@ export const api = {
     update: (
       token: string,
       habitId: number,
-      payload: { name?: string; description?: string | null; frequency?: string; target_count?: number; days_of_week?: number[] }
+      payload: { name?: string; description?: string | null; frequency?: string; target_count?: number; days_of_week?: number[]; visibility?: string; category?: string | null; icon?: string | null }
     ) =>
       apiFetch<HabitResponse>(`/api/habits/${habitId}`, {
         method: "PATCH",
@@ -296,20 +425,40 @@ export const api = {
       }),
     delete: (token: string, habitId: number) =>
       apiFetch<void>(`/api/habits/${habitId}`, { method: "DELETE", token }),
+    publicList: (token: string, userId: number) =>
+      apiFetch<HabitResponse[]>(`/api/habits/public/${userId}`, { token }),
+    getVisibleTo: (token: string, habitId: number) =>
+      apiFetch<number[]>(`/api/habits/${habitId}/visible-to`, { token }),
+    setVisibleTo: (token: string, habitId: number, userIds: number[]) =>
+      apiFetch<void>(`/api/habits/${habitId}/visible-to`, { method: "PUT", token, body: userIds }),
   },
   analytics: {
     summary: (token: string) =>
       apiFetch<AnalyticsSummaryResponse>("/api/analytics/summary", { token }),
     stats: (token: string) => apiFetch<UserStatsResponse>("/api/analytics/stats", { token }),
+    leaderboard: (
+      token: string,
+      params?: { limit?: number; friends_only?: boolean; period?: "total" | "month"; month?: string }
+    ) => {
+      const qs = new URLSearchParams();
+      if (params?.limit) qs.set("limit", String(params.limit));
+      if (params?.friends_only) qs.set("friends_only", "true");
+      if (params?.period) qs.set("period", params.period);
+      if (params?.month) qs.set("month", params.month);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return apiFetch<LeaderboardResponse>(`/api/analytics/leaderboard${suffix}`, { token });
+    },
     sentiment: (token: string, days = 90) =>
       apiFetch<SentimentTrendResponse>(`/api/analytics/sentiment?days=${days}`, { token }),
-    correlations: (token: string, days = 90, minCorrelation = 0.3) =>
+    correlations: (token: string, days = 90, minCorrelation = 0.3, minCoOccurrenceDays = 7) =>
       apiFetch<CorrelationMatrixResponse>(
-        `/api/analytics/correlations?days=${days}&min_correlation=${minCorrelation}`,
+        `/api/analytics/correlations?days=${days}&min_correlation=${minCorrelation}&min_co_occurrence_days=${minCoOccurrenceDays}`,
         { token }
       ),
-    heatmap: (token: string, days = 365) =>
-      apiFetch<HeatmapResponse>(`/api/analytics/heatmap?days=${days}`, { token }),
+    heatmap: (token: string, days = 365, userId?: number) =>
+      apiFetch<HeatmapResponse>(`/api/analytics/heatmap?days=${days}${userId ? `&user_id=${userId}` : ""}`, { token }),
+    habits: (token: string, days = 90) =>
+      apiFetch<HabitAnalyticsItem[]>(`/api/analytics/habits?days=${days}`, { token }),
   },
   friends: {
     list: (token: string) => apiFetch<FriendResponse[]>("/api/friends", { token }),
@@ -328,9 +477,12 @@ export const api = {
     requests: (token: string) => apiFetch<FriendResponse[]>("/api/friends/requests", { token }),
   },
   feed: {
-    list: (token: string, params?: { friends_only?: boolean }) => {
+    list: (token: string, params?: { friends_only?: boolean; mine_only?: boolean; skip?: number; limit?: number }) => {
       const qs = new URLSearchParams();
       if (params?.friends_only) qs.set("friends_only", "true");
+      if (params?.mine_only) qs.set("mine_only", "true");
+      if (params?.skip) qs.set("skip", String(params.skip));
+      if (params?.limit) qs.set("limit", String(params.limit));
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
       return apiFetch<ActivityFeedItemResponse[]>(`/api/feed${suffix}`, { token });
     },
@@ -346,6 +498,59 @@ export const api = {
   search: {
     users: (token: string, q: string) =>
       apiFetch<FriendSearchResult[]>(`/api/friends/search?q=${encodeURIComponent(q)}`, { token }),
+  },
+  ai: {
+    dailyInsight: (token: string) =>
+      apiFetch<{ insight: string; date: string }>("/api/ai/daily-insight", { token }),
+    chat: (token: string, message: string, history: { role: string; content: string }[] = []) =>
+      apiFetch<{ reply: string }>("/api/ai/chat", { method: "POST", token, body: { message, history } }),
+    analyze: (
+      token: string,
+      message: string,
+      history: { role: string; content: string }[] = [],
+      profile_answers?: Record<string, unknown>,
+    ) =>
+      apiFetch<AnalyzeResponse>("/api/ai/analyze", {
+        method: "POST",
+        token,
+        body: { message, history, ...(profile_answers ? { profile_answers } : {}) },
+      }),
+  },
+  user: {
+    getProfile: (token: string) =>
+      apiFetch<{ data: Record<string, unknown>; updated_at: string | null }>("/api/user/profile", { token }),
+    patchProfile: (token: string, data: Record<string, unknown>) =>
+      apiFetch<{ data: Record<string, unknown>; updated_at: string | null }>("/api/user/profile", {
+        method: "PATCH",
+        token,
+        body: { data },
+      }),
+  },
+  sharedHabits: {
+    invite: (token: string, habitId: number, userId: number) =>
+      apiFetch<{ message: string; group_id: number }>(`/api/habits/${habitId}/share`, {
+        method: "POST",
+        token,
+        body: { user_id: userId },
+      }),
+    invitations: (token: string) =>
+      apiFetch<SharedHabitInvitation[]>("/api/shared-habits/invitations", { token }),
+    accept: (token: string, groupId: number) =>
+      apiFetch<{ message: string; habit_id: number }>(`/api/shared-habits/invitations/${groupId}/accept`, {
+        method: "POST",
+        token,
+      }),
+    decline: (token: string, groupId: number) =>
+      apiFetch<{ message: string }>(`/api/shared-habits/invitations/${groupId}/decline`, {
+        method: "POST",
+        token,
+      }),
+    leave: (token: string, groupId: number) =>
+      apiFetch<void>(`/api/shared-habits/${groupId}/leave`, { method: "DELETE", token }),
+    members: (token: string, habitId: number) =>
+      apiFetch<SharedHabitMemberStat[]>(`/api/habits/${habitId}/members`, { token }),
+    shareInfo: (token: string, habitId: number) =>
+      apiFetch<ShareInfo>(`/api/habits/${habitId}/share-info`, { token }),
   },
 };
 

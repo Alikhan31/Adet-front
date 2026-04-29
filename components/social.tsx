@@ -4,14 +4,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Heart, MessageCircle, UserPlus, Search, Flame,
   Send, X, ChevronDown, ChevronUp, UserCheck, UserX, Trash2,
+  Eye, EyeOff, Lock, Zap, Trophy,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import {
   api,
@@ -20,6 +21,9 @@ import {
   type FriendResponse,
   type FeedCommentResponse,
   type FriendSearchResult,
+  type HabitResponse,
+  type HeatmapDay,
+  type SharedHabitInvitation,
 } from "@/lib/api";
 
 type Props = { token: string; userId: number };
@@ -51,38 +55,80 @@ function avatarColor(idx: number) {
 // Feed tab
 // ---------------------------------------------------------------------------
 
-interface FeedState {
-  items: ActivityFeedItemResponse[];
-  loading: boolean;
-  error: string | null;
-}
+const FEED_PAGE_SIZE = 10;
 
-function FeedTab({ token, userId }: { token: string; userId: number }) {
-  const [state, setState] = useState<FeedState>({ items: [], loading: true, error: null });
+function FeedList({
+  token,
+  userId,
+  mode,
+}: {
+  token: string;
+  userId: number;
+  mode: "mine" | "others";
+}) {
+  const [items, setItems] = useState<ActivityFeedItemResponse[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
   const [expandedComments, setExpandedComments] = useState<Set<number>>(new Set());
   const [commentInputs, setCommentInputs] = useState<Map<number, string>>(new Map());
   const [sendingComment, setSendingComment] = useState<Set<number>>(new Set());
   const [likedIds, setLikedIds] = useState<Set<number>>(new Set());
 
+  const feedParams = mode === "mine"
+    ? { mine_only: true }
+    : { friends_only: true };
+
   async function load() {
-    setState((s) => ({ ...s, loading: true, error: null }));
+    setLoading(true);
+    setError(null);
     try {
-      const items = await api.feed.list(token);
-      setState({ items, loading: false, error: null });
-      // Pre-seed liked state from reactions
+      const page = await api.feed.list(token, { ...feedParams, limit: FEED_PAGE_SIZE });
+      setItems(page);
+      setHasMore(page.length === FEED_PAGE_SIZE);
       const liked = new Set<number>();
-      for (const item of items) {
-        if (item.reactions.some((r) => r.user_id === userId && r.type === "like")) {
-          liked.add(item.id);
-        }
+      for (const item of page) {
+        if (item.reactions.some((r) => r.user_id === userId && r.type === "like")) liked.add(item.id);
       }
       setLikedIds(liked);
     } catch (e) {
-      setState({ items: [], loading: false, error: (e as ApiError).message ?? "Failed to load feed" });
+      setError((e as ApiError).message ?? "Failed to load feed");
+    } finally {
+      setLoading(false);
     }
   }
 
-  useEffect(() => { void load(); }, [token]);
+  async function loadMore() {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    try {
+      const page = await api.feed.list(token, { ...feedParams, skip: items.length, limit: FEED_PAGE_SIZE });
+      setItems((prev) => [...prev, ...page]);
+      setHasMore(page.length === FEED_PAGE_SIZE);
+      const liked = new Set<number>(likedIds);
+      for (const item of page) {
+        if (item.reactions.some((r) => r.user_id === userId && r.type === "like")) liked.add(item.id);
+      }
+      setLikedIds(liked);
+    } catch {
+      // silently fail
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  useEffect(() => { void load(); }, [token, mode]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter((item) => {
+      const name = (item.user_full_name ?? item.user_email ?? "").toLowerCase();
+      return name.includes(q);
+    });
+  }, [items, search]);
 
   const toggleComments = (id: number) => {
     setExpandedComments((prev) => {
@@ -94,15 +140,21 @@ function FeedTab({ token, userId }: { token: string; userId: number }) {
 
   const toggleLike = async (item: ActivityFeedItemResponse) => {
     const liked = likedIds.has(item.id);
+    // Optimistic update both likedIds and reaction count in items
     setLikedIds((prev) => {
       const n = new Set(prev);
       liked ? n.delete(item.id) : n.add(item.id);
       return n;
     });
+    setItems((prev) => prev.map((i) => {
+      if (i.id !== item.id) return i;
+      const reactions = liked
+        ? i.reactions.filter((r) => !(r.user_id === userId && r.type === "like"))
+        : [...i.reactions, { id: -Date.now(), event_id: i.id, user_id: userId, type: "like", created_at: new Date().toISOString() }];
+      return { ...i, reactions };
+    }));
     try {
       if (liked) {
-        await api.feed.list(token); // refresh — we don't store reaction id, so re-fetch
-        // Actually call delete reaction
         await fetch(`/api/feed/${item.id}/react?reaction_type=like`, {
           method: "DELETE",
           headers: { Authorization: `Bearer ${token}` },
@@ -121,6 +173,13 @@ function FeedTab({ token, userId }: { token: string; userId: number }) {
         liked ? n.add(item.id) : n.delete(item.id);
         return n;
       });
+      setItems((prev) => prev.map((i) => {
+        if (i.id !== item.id) return i;
+        const reactions = liked
+          ? [...i.reactions, { id: -Date.now(), event_id: i.id, user_id: userId, type: "like", created_at: new Date().toISOString() }]
+          : i.reactions.filter((r) => !(r.user_id === userId && r.type === "like"));
+        return { ...i, reactions };
+      }));
     }
   };
 
@@ -131,14 +190,11 @@ function FeedTab({ token, userId }: { token: string; userId: number }) {
     try {
       const cm = await api.feed.addComment(token, eventId, text);
       setCommentInputs((prev) => new Map(prev).set(eventId, ""));
-      setState((prev) => ({
-        ...prev,
-        items: prev.items.map((item) =>
-          item.id === eventId
-            ? { ...item, comments: [...item.comments, cm], comments_count: item.comments_count + 1 }
-            : item
-        ),
-      }));
+      setItems((prev) => prev.map((item) =>
+        item.id === eventId
+          ? { ...item, comments: [...item.comments, cm], comments_count: item.comments_count + 1 }
+          : item
+      ));
     } catch {
       // silently fail
     } finally {
@@ -149,40 +205,50 @@ function FeedTab({ token, userId }: { token: string; userId: number }) {
   const deleteComment = async (eventId: number, commentId: number) => {
     try {
       await api.feed.deleteComment(token, eventId, commentId);
-      setState((prev) => ({
-        ...prev,
-        items: prev.items.map((item) =>
-          item.id === eventId
-            ? {
-                ...item,
-                comments: item.comments.filter((c) => c.id !== commentId),
-                comments_count: item.comments_count - 1,
-              }
-            : item
-        ),
-      }));
+      setItems((prev) => prev.map((item) =>
+        item.id === eventId
+          ? { ...item, comments: item.comments.filter((c) => c.id !== commentId), comments_count: item.comments_count - 1 }
+          : item
+      ));
     } catch {
       // silently fail
     }
   };
 
-  if (state.loading) return <p className="mt-4 text-sm text-muted-foreground">Loading feed…</p>;
-  if (state.error) return <p className="mt-4 text-sm text-destructive">{state.error}</p>;
-  if (state.items.length === 0)
-    return (
-      <p className="mt-4 text-sm text-muted-foreground">
-        No activity yet. Add friends to see their activity here.
-      </p>
-    );
+  if (loading) return <p className="mt-4 text-sm text-muted-foreground">Loading feed…</p>;
+  if (error) return <p className="mt-4 text-sm text-destructive">{error}</p>;
 
   return (
     <div className="flex flex-col gap-3 mt-4">
-      {state.items.map((item, idx) => {
+      {/* Search bar — only for friends feed */}
+      {mode === "others" && (
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            placeholder="Search by name…"
+            className="pl-9"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+      )}
+
+      {filtered.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          {search
+            ? "No results for that name."
+            : mode === "mine"
+              ? "No activity yet. Complete some habits to see your history here."
+              : "No activity yet. Add friends to see their activity here."}
+        </p>
+      )}
+
+      {filtered.map((item, idx) => {
         const displayName = item.user_full_name || item.user_email || "User";
         const payload = (item.payload ?? {}) as Record<string, unknown>;
         const habitName = typeof payload.habit_name === "string" ? payload.habit_name : "a habit";
-        const likeCount = item.reactions.filter((r) => r.type === "like").length + (likedIds.has(item.id) && !item.reactions.some((r) => r.user_id === userId && r.type === "like") ? 1 : 0) - (!likedIds.has(item.id) && item.reactions.some((r) => r.user_id === userId && r.type === "like") ? 1 : 0);
         const commentsOpen = expandedComments.has(item.id);
+        const likeCount = item.reactions.filter((r) => r.type === "like").length;
 
         return (
           <Card key={item.id} className="border">
@@ -214,7 +280,7 @@ function FeedTab({ token, userId }: { token: string; userId: number }) {
                       onClick={() => void toggleLike(item)}
                     >
                       <Heart className={cn("h-4 w-4", likedIds.has(item.id) && "fill-current")} />
-                      {item.reactions.filter((r) => r.type === "like").length}
+                      {likeCount}
                     </button>
                     <button
                       type="button"
@@ -291,7 +357,167 @@ function FeedTab({ token, userId }: { token: string; userId: number }) {
           </Card>
         );
       })}
+
+      {/* Pagination */}
+      {hasMore && !search && (
+        <button
+          type="button"
+          onClick={() => void loadMore()}
+          disabled={loadingMore}
+          className="w-full py-2.5 text-sm font-medium text-primary hover:text-primary/80 disabled:opacity-50 transition-colors"
+        >
+          {loadingMore ? "Loading…" : "Load more"}
+        </button>
+      )}
+      {!hasMore && items.length > 0 && !search && (
+        <p className="text-center text-xs text-muted-foreground py-2">You're all caught up</p>
+      )}
     </div>
+  );
+}
+
+function FeedTab({ token, userId }: { token: string; userId: number }) {
+  return (
+    <Tabs defaultValue="mine" className="mt-3">
+      <TabsList className="w-full">
+        <TabsTrigger value="mine" className="flex-1">My</TabsTrigger>
+        <TabsTrigger value="others" className="flex-1">Other</TabsTrigger>
+      </TabsList>
+      <TabsContent value="mine">
+        <FeedList token={token} userId={userId} mode="mine" />
+      </TabsContent>
+      <TabsContent value="others">
+        <FeedList token={token} userId={userId} mode="others" />
+      </TabsContent>
+    </Tabs>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Friends tab
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Friend profile sheet
+// ---------------------------------------------------------------------------
+
+function FriendHeatmap({ days }: { days: HeatmapDay[] }) {
+  const today = new Date();
+  const grid: { date: string; count: number }[] = [];
+  for (let i = 89; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    const iso = d.toISOString().split("T")[0];
+    const found = days.find((x) => x.date === iso);
+    grid.push({ date: iso, count: found?.count ?? 0 });
+  }
+  return (
+    <div className="flex flex-wrap gap-[3px] mt-1">
+      {grid.map((d, i) => (
+        <div
+          key={i}
+          title={`${d.date}: ${d.count}`}
+          className="h-[9px] w-[9px] rounded-[2px]"
+          style={{ backgroundColor: d.count > 0 ? `hsl(var(--primary) / ${Math.min(0.3 + d.count * 0.2, 1)})` : "hsl(var(--muted))" }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function FriendProfileSheet({
+  token,
+  friend,
+  open,
+  onClose,
+  friendXp,
+}: {
+  token: string;
+  friend: FriendResponse | null;
+  open: boolean;
+  onClose: () => void;
+  friendXp?: number;
+}) {
+  const [habits, setHabits] = useState<HabitResponse[]>([]);
+  const [heatmap, setHeatmap] = useState<HeatmapDay[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open || !friend) return;
+    setLoading(true);
+    Promise.all([
+      api.habits.publicList(token, friend.id),
+      api.analytics.heatmap(token, 90, friend.id).catch(() => ({ days: [] })),
+    ]).then(([h, hm]) => {
+      setHabits(h);
+      setHeatmap(hm.days);
+    }).catch(() => {
+      setHabits([]);
+      setHeatmap([]);
+    }).finally(() => setLoading(false));
+  }, [open, friend, token]);
+
+  const name = friend ? (friend.full_name || friend.email) : "";
+
+  return (
+    <Sheet open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <SheetContent side="bottom" className="rounded-t-2xl max-h-[80dvh] overflow-y-auto">
+        <SheetHeader className="mb-4">
+          <div className="flex items-center gap-3">
+            <Avatar className="h-12 w-12">
+              <AvatarFallback className="bg-chart-1 text-primary-foreground font-semibold">
+                {initials(name)}
+              </AvatarFallback>
+            </Avatar>
+            <div className="flex-1 min-w-0">
+              <SheetTitle className="text-left">{name}</SheetTitle>
+              {friend?.full_name && (
+                <p className="text-xs text-muted-foreground">{friend.email}</p>
+              )}
+            </div>
+            {friendXp !== undefined && (
+              <div className="flex items-center gap-1 rounded-full bg-primary/10 px-2.5 py-1">
+                <Zap className="h-3.5 w-3.5 text-primary" />
+                <span className="text-xs font-bold text-primary">{friendXp} XP</span>
+              </div>
+            )}
+          </div>
+        </SheetHeader>
+
+        {loading && <p className="text-sm text-muted-foreground mb-4">Loading…</p>}
+
+        {/* Heatmap */}
+        {!loading && heatmap.length > 0 && (
+          <div className="mb-4">
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Last 90 days</p>
+            <FriendHeatmap days={heatmap} />
+          </div>
+        )}
+
+        {/* Habits */}
+        <p className="text-sm font-semibold mb-2">Habits</p>
+        {!loading && habits.length === 0 && (
+          <p className="text-sm text-muted-foreground">No public habits shared.</p>
+        )}
+        <div className="space-y-2 pb-4">
+          {habits.map((h) => (
+            <Card key={h.id} className="border">
+              <CardContent className="flex items-center gap-3 p-3">
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium truncate">{h.name}</p>
+                  {h.description && (
+                    <p className="text-xs text-muted-foreground truncate">{h.description}</p>
+                  )}
+                </div>
+                {h.category && (
+                  <Badge variant="secondary" className="text-xs shrink-0">{h.category}</Badge>
+                )}
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -302,6 +528,7 @@ function FeedTab({ token, userId }: { token: string; userId: number }) {
 function FriendsTab({ token }: { token: string }) {
   const [friends, setFriends] = useState<FriendResponse[]>([]);
   const [requests, setRequests] = useState<FriendResponse[]>([]);
+  const [friendXpMap, setFriendXpMap] = useState<Map<number, number>>(new Map());
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<FriendSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
@@ -309,17 +536,24 @@ function FriendsTab({ token }: { token: string }) {
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [profileFriend, setProfileFriend] = useState<FriendResponse | null>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function loadFriends() {
     setLoading(true);
     try {
-      const [fr, rq] = await Promise.all([
+      const [fr, rq, lb] = await Promise.all([
         api.friends.list(token),
         api.friends.requests(token).catch(() => [] as FriendResponse[]),
+        api.analytics.leaderboard(token, { friends_only: true }).catch(() => null),
       ]);
       setFriends(fr);
       setRequests(rq);
+      if (lb) {
+        const map = new Map<number, number>();
+        for (const e of lb.entries) map.set(e.user_id, e.total_xp);
+        setFriendXpMap(map);
+      }
     } catch (e) {
       setError((e as ApiError).message ?? "Failed to load friends");
     } finally {
@@ -524,31 +758,52 @@ function FriendsTab({ token }: { token: string }) {
           <p className="text-sm text-muted-foreground">No friends yet. Search above to add some!</p>
         )}
         <div className="space-y-2">
-          {friends.map((f, idx) => (
-            <Card key={f.id} className="border">
-              <CardContent className="flex items-center gap-3 p-3">
-                <Avatar className="h-9 w-9">
-                  <AvatarFallback className={cn(avatarColor(idx), "text-primary-foreground text-xs font-semibold")}>
-                    {initials(f.full_name || f.email)}
-                  </AvatarFallback>
-                </Avatar>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate">{f.full_name || f.email}</p>
-                  {f.full_name && <p className="text-xs text-muted-foreground truncate">{f.email}</p>}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => void removeFriend(f.id)}
-                  className="h-7 w-7 flex items-center justify-center rounded-full hover:bg-muted transition-colors"
-                  title="Remove friend"
-                >
-                  <Trash2 className="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
-                </button>
-              </CardContent>
-            </Card>
-          ))}
+          {friends.map((f, idx) => {
+            const xp = friendXpMap.get(f.id);
+            return (
+              <Card
+                key={f.id}
+                className="border cursor-pointer hover:shadow-sm transition-shadow"
+                onClick={() => setProfileFriend(f)}
+              >
+                <CardContent className="flex items-center gap-3 p-3">
+                  <Avatar className="h-9 w-9">
+                    <AvatarFallback className={cn(avatarColor(idx), "text-primary-foreground text-xs font-semibold")}>
+                      {initials(f.full_name || f.email)}
+                    </AvatarFallback>
+                  </Avatar>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{f.full_name || f.email}</p>
+                    {f.full_name && <p className="text-xs text-muted-foreground truncate">{f.email}</p>}
+                  </div>
+                  {xp !== undefined && (
+                    <div className="flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 mr-1">
+                      <Zap className="h-3 w-3 text-primary" />
+                      <span className="text-xs font-bold text-primary">{xp}</span>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); void removeFriend(f.id); }}
+                    className="h-7 w-7 flex items-center justify-center rounded-full hover:bg-muted transition-colors"
+                    title="Remove friend"
+                  >
+                    <Trash2 className="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
+                  </button>
+                </CardContent>
+              </Card>
+            );
+          })}
         </div>
       </div>
+
+      <FriendProfileSheet
+        token={token}
+        friend={profileFriend}
+        open={profileFriend !== null}
+        onClose={() => setProfileFriend(null)}
+        friendXp={profileFriend ? friendXpMap.get(profileFriend.id) : undefined}
+      />
     </div>
   );
 }
@@ -557,15 +812,104 @@ function FriendsTab({ token }: { token: string }) {
 // Root component
 // ---------------------------------------------------------------------------
 
+function HabitInvitationsTab({ token }: { token: string }) {
+  const [invitations, setInvitations] = useState<SharedHabitInvitation[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<Set<number>>(new Set());
+
+  async function load() {
+    setLoading(true);
+    try {
+      const data = await api.sharedHabits.invitations(token);
+      setInvitations(data);
+    } catch {
+      // silently fail
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { void load(); }, [token]);
+
+  const respond = async (groupId: number, accept: boolean) => {
+    setBusy((prev) => new Set(prev).add(groupId));
+    try {
+      if (accept) {
+        await api.sharedHabits.accept(token, groupId);
+      } else {
+        await api.sharedHabits.decline(token, groupId);
+      }
+      setInvitations((prev) => prev.filter((i) => i.group_id !== groupId));
+    } catch {
+      // silently fail
+    } finally {
+      setBusy((prev) => { const n = new Set(prev); n.delete(groupId); return n; });
+    }
+  };
+
+  if (loading) {
+    return <p className="mt-6 text-center text-sm text-muted-foreground">Loading invitations…</p>;
+  }
+
+  if (invitations.length === 0) {
+    return (
+      <div className="mt-8 text-center text-muted-foreground">
+        <p className="text-sm">No pending habit invitations.</p>
+        <p className="mt-1 text-xs">When a friend shares a habit with you it will appear here.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4 space-y-3">
+      {invitations.map((inv) => (
+        <Card key={inv.group_id}>
+          <CardContent className="p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="font-medium truncate">{inv.habit_name}</p>
+                <p className="text-sm text-muted-foreground">
+                  from {inv.owner_name || inv.owner_email}
+                </p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {new Date(inv.invited_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                </p>
+              </div>
+              <div className="flex gap-2 flex-shrink-0">
+                <Button
+                  size="sm"
+                  disabled={busy.has(inv.group_id)}
+                  onClick={() => void respond(inv.group_id, true)}
+                >
+                  Accept
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy.has(inv.group_id)}
+                  onClick={() => void respond(inv.group_id, false)}
+                >
+                  Decline
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
 export function Social({ token, userId }: Props) {
   return (
-    <div className="mx-auto max-w-lg px-4 pt-6 pb-8">
+    <div className="mx-auto max-w-lg md:max-w-3xl px-4 pt-6 pb-8">
       <h1 className="text-2xl font-bold tracking-tight text-foreground">Friends</h1>
 
       <Tabs defaultValue="feed" className="mt-4">
         <TabsList className="w-full">
           <TabsTrigger value="feed" className="flex-1">Feed</TabsTrigger>
           <TabsTrigger value="friends" className="flex-1">Friends</TabsTrigger>
+          <TabsTrigger value="habits" className="flex-1">Shared</TabsTrigger>
         </TabsList>
 
         <TabsContent value="feed">
@@ -574,6 +918,10 @@ export function Social({ token, userId }: Props) {
 
         <TabsContent value="friends">
           <FriendsTab token={token} />
+        </TabsContent>
+
+        <TabsContent value="habits">
+          <HabitInvitationsTab token={token} />
         </TabsContent>
       </Tabs>
     </div>

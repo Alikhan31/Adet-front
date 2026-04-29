@@ -1,4 +1,4 @@
-const TOKEN_KEY = "habitflow_token";
+const TOKEN_KEY = "adet_token";
 
 export function getStoredToken(): string | null {
   if (typeof window === "undefined") return null;

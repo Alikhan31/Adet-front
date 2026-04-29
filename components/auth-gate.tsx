@@ -9,7 +9,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 
-type Mode = "login" | "register" | "forgot";
+type Mode = "login" | "register" | "forgot" | "verify-pending";
 
 type Props = {
   children: (args: { token: string; user: UserResponse; logout: () => void }) => React.ReactNode;
@@ -85,6 +85,9 @@ export function AuthGate({ children }: Props) {
       }
       if (mode === "register") {
         await api.auth.register({ email, password, full_name: fullName || undefined });
+        setMode("verify-pending");
+        setPassword("");
+        return;
       }
       const t = await api.auth.login({ email, password });
       setStoredToken(t.access_token);
@@ -97,8 +100,56 @@ export function AuthGate({ children }: Props) {
     }
   }
 
+  async function resendVerification() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await api.auth.resendVerification(email);
+      setSuccessMsg(res.message);
+    } catch (e) {
+      setError((e as ApiError).message ?? "Failed to resend");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   if (loading) return null;
   if (token && user) return <>{children({ token, user, logout })}</>;
+
+  if (mode === "verify-pending") {
+    return (
+      <div className="mx-auto flex min-h-dvh max-w-lg items-center justify-center px-4">
+        <Card className="w-full border">
+          <CardContent className="p-6 text-center space-y-4">
+            <div className="text-4xl">📧</div>
+            <h2 className="text-lg font-semibold">Check your email</h2>
+            <p className="text-sm text-muted-foreground">
+              We sent a verification link to <span className="font-medium text-foreground">{email}</span>.
+              Click the link in the email to activate your account.
+            </p>
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            {successMsg && <p className="text-sm text-green-600 dark:text-green-400">{successMsg}</p>}
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
+              onClick={() => void resendVerification()}
+              disabled={submitting}
+            >
+              {submitting ? "Sending..." : "Resend verification email"}
+            </Button>
+            <button
+              type="button"
+              onClick={() => switchMode("login")}
+              className="text-xs text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
+            >
+              Back to sign in
+            </button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   const isForgot = mode === "forgot";
 
@@ -107,7 +158,7 @@ export function AuthGate({ children }: Props) {
       <Card className="w-full border">
         <CardContent className="p-6">
           <div className="mb-4">
-            <h1 className="text-xl font-bold">HabitFlow</h1>
+            <h1 className="text-xl font-bold">Adet</h1>
             <p className="text-sm text-muted-foreground">
               {mode === "login" && "Sign in to continue"}
               {mode === "register" && "Create an account"}

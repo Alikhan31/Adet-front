@@ -15,12 +15,43 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { api } from "@/lib/api";
+import { getStoredToken } from "@/lib/auth";
 
 interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
   time: string;
+}
+
+interface HistoryItem {
+  role: string;
+  content: string;
+}
+
+const SESSION_KEY = "adet_coach_session";
+const SESSION_TTL = 24 * 60 * 60 * 1000; // 24h
+
+function loadSession(): { messages: Message[]; history: HistoryItem[] } | null {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw) as { messages: Message[]; history: HistoryItem[]; savedAt: number };
+    if (Date.now() - data.savedAt > SESSION_TTL) {
+      sessionStorage.removeItem(SESSION_KEY);
+      return null;
+    }
+    return { messages: data.messages, history: data.history };
+  } catch {
+    return null;
+  }
+}
+
+function saveSession(messages: Message[], history: HistoryItem[]) {
+  try {
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify({ messages, history, savedAt: Date.now() }));
+  } catch {}
 }
 
 const suggestions = [
@@ -30,32 +61,51 @@ const suggestions = [
   { icon: Sparkles, text: "Give me a motivation boost" },
 ];
 
-const initialMessages: Message[] = [
-  {
-    id: "1",
-    role: "assistant",
-    content:
-      "Hey Alex! I am your AI habit coach. I have been analyzing your recent progress -- you are doing great with a 85% consistency score this week! How can I help you today?",
-    time: "Just now",
-  },
-];
-
-const coachResponses: Record<string, string> = {
-  "How can I improve my morning routine?":
-    "Based on your data, your morning habits have a 72% completion rate. Here are my suggestions:\n\n1. Start with your easiest habit (drinking water) to build momentum\n2. Move your alarm 15 minutes earlier\n3. Pair your run with a podcast you enjoy\n\nYour best mornings happen when you complete habits before 8 AM. Try setting a gentle reminder at 6:30 AM!",
-  "Why did my streak drop last week?":
-    "Looking at your data from last week, I noticed a dip on Thursday and Friday. This coincided with your late sleep times (past midnight both nights). When your sleep habit breaks, it creates a domino effect on your morning habits.\n\nMy recommendation: prioritize your \"Sleep by 11 PM\" habit. It is the keystone habit that influences 4 of your other 5 habits!",
-  "What is the best time to meditate?":
-    "Based on your completion patterns, you are most consistent with habits done before 9 AM. However, your meditation success rate is actually higher in the evening (78% vs 62%).\n\nI recommend trying a short 5-minute meditation right after your morning run (when your focus is peak) and a longer 10-minute session before bed.",
-  "Give me a motivation boost":
-    "Here is what is amazing about your journey:\n\n- You have completed 247 habits this month\n- Your water intake streak is 24 days -- that is in the top 10% of users!\n- You have been more consistent than 73% of people your age\n\nRemember: progress is not always linear. The fact that you are here asking for help shows incredible self-awareness. You have got this!",
-};
+function nowTime() {
+  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 
 export function AiCoach() {
-  const [messages, setMessages] = useState<Message[]>(initialMessages);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const saved = loadSession();
+    if (saved) {
+      setMessages(saved.messages);
+      setHistory(saved.history);
+      return;
+    }
+
+    async function init() {
+      const token = getStoredToken();
+      if (!token) {
+        const msg: Message[] = [{ id: "1", role: "assistant", content: "Hey! I'm your AI habit coach. How can I help you today?", time: "Just now" }];
+        setMessages(msg);
+        saveSession(msg, []);
+        return;
+      }
+      try {
+        const [me, summary] = await Promise.all([api.auth.me(token), api.analytics.summary(token)]);
+        const name = me.full_name?.split(" ")[0] ?? me.email.split("@")[0];
+        const pct = summary.possible_this_week > 0
+          ? Math.round((summary.completions_this_week / summary.possible_this_week) * 100)
+          : 0;
+        const greeting = `Hey ${name}! I'm your AI habit coach. I've been looking at your data — you're at a ${pct}% completion rate this week with ${summary.habits_count} active habits. How can I help you today?`;
+        const msg: Message[] = [{ id: "1", role: "assistant", content: greeting, time: "Just now" }];
+        setMessages(msg);
+        saveSession(msg, []);
+      } catch {
+        const msg: Message[] = [{ id: "1", role: "assistant", content: "Hey! I'm your AI habit coach. How can I help you today?", time: "Just now" }];
+        setMessages(msg);
+        saveSession(msg, []);
+      }
+    }
+    init();
+  }, []);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -63,44 +113,59 @@ export function AiCoach() {
     }
   }, [messages, isTyping]);
 
-  const sendMessage = (text: string) => {
-    if (!text.trim()) return;
+  const sendMessage = async (text: string) => {
+    if (!text.trim() || isTyping) return;
 
+    const token = getStoredToken();
     const userMessage: Message = {
       id: Date.now().toString(),
       role: "user",
       content: text.trim(),
-      time: "Just now",
+      time: nowTime(),
     };
-
-    setMessages((prev) => [...prev, userMessage]);
+    setMessages(prev => {
+      const next = [...prev, userMessage];
+      saveSession(next, history);
+      return next;
+    });
     setInput("");
     setIsTyping(true);
 
-    setTimeout(() => {
-      const response =
-        coachResponses[text.trim()] ||
-        "That is a great question! Based on your habit data, I would recommend starting small and building consistency first. Would you like me to create a personalized plan for you?";
-
-      const botMessage: Message = {
+    try {
+      if (!token) throw new Error("no token");
+      const { reply } = await api.ai.chat(token, text.trim(), history);
+      const newHistory = [...history, { role: "user", content: text.trim() }, { role: "assistant", content: reply }];
+      const assistantMsg: Message = { id: (Date.now() + 1).toString(), role: "assistant", content: reply, time: nowTime() };
+      setHistory(newHistory);
+      setMessages(prev => {
+        const next = [...prev, assistantMsg];
+        saveSession(next, newHistory);
+        return next;
+      });
+    } catch {
+      const errMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: response,
-        time: "Just now",
+        content: "Sorry, I couldn't reach the AI service right now. Please try again in a moment.",
+        time: nowTime(),
       };
-
-      setMessages((prev) => [...prev, botMessage]);
+      setMessages(prev => {
+        const next = [...prev, errMsg];
+        saveSession(next, history);
+        return next;
+      });
+    } finally {
       setIsTyping(false);
-    }, 1200);
+    }
   };
 
   const showSuggestions = messages.length <= 1;
 
   return (
-    <div className="flex h-[calc(100dvh-5rem)] flex-col">
+    <div className="flex h-[calc(100dvh-5rem)] md:h-dvh flex-col">
       {/* Header */}
       <div className="border-b border-border px-4 py-4">
-        <div className="mx-auto flex max-w-lg items-center gap-3">
+        <div className="mx-auto flex max-w-lg md:max-w-3xl items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary">
             <Bot className="h-5 w-5 text-primary-foreground" />
           </div>
@@ -119,7 +184,7 @@ export function AiCoach() {
 
       {/* Messages */}
       <ScrollArea className="flex-1" ref={scrollRef}>
-        <div className="mx-auto max-w-lg px-4 py-4">
+        <div className="mx-auto max-w-lg md:max-w-3xl px-4 py-4">
           <div className="flex flex-col gap-4">
             {messages.map((message) => (
               <div
@@ -228,7 +293,7 @@ export function AiCoach() {
       {/* Input */}
       <div className="border-t border-border px-4 py-3">
         <form
-          className="mx-auto flex max-w-lg items-center gap-2"
+          className="mx-auto flex max-w-lg md:max-w-3xl items-center gap-2"
           onSubmit={(e) => {
             e.preventDefault();
             sendMessage(input);
